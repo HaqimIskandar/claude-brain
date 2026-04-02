@@ -339,19 +339,30 @@ var Mind = class _Mind {
         reverse: true
       });
       const frames = Array.isArray(timeline) ? timeline : timeline.frames || [];
-      const recentObservations = frames.map(
+      const fullFrames = await Promise.all(
+        frames.map((frame) => this.memvid.getFrameInfo(frame.frame_id || frame.id))
+      );
+      const recentObservations = fullFrames.map(
         (frame) => {
-          let ts = frame.metadata?.timestamp || frame.timestamp || 0;
+          let ts = frame.timestamp || frame.metadata?.timestamp || 0;
           if (ts > 0 && ts < 4102444800) {
             ts = ts * 1e3;
           }
+          let type = frame.labels?.[0] || frame.label;
+          if (!type && frame.title) {
+            const titleMatch = frame.title.match(/^\[([^\]]+)\]/);
+            if (titleMatch) type = titleMatch[1];
+          }
+          if (!type && Array.isArray(frame.tags) && frame.tags.length > 0) {
+            type = frame.tags[0];
+          }
           return {
-            id: frame.metadata?.observationId || frame.frame_id,
+            id: frame.metadata?.observationId || frame.id || frame.frame_id,
             timestamp: ts,
-            type: frame.label || frame.metadata?.type || "observation",
+            type: type || "observation",
             tool: frame.metadata?.tool,
             summary: frame.title?.replace(/^\[.*?\]\s*/, "") || frame.preview?.slice(0, 100) || "",
-            content: frame.text || frame.preview || "",
+            content: frame.title || frame.preview || "",
             metadata: frame.metadata
           };
         }
