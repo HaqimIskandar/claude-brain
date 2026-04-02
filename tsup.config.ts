@@ -5,6 +5,7 @@ export default defineConfig({
     index: "src/index.ts",
     "hooks/smart-install": "src/hooks/smart-install.ts",
     "hooks/session-start": "src/hooks/session-start.ts",
+    "hooks/user-prompt": "src/hooks/user-prompt.ts",
     "hooks/post-tool-use": "src/hooks/post-tool-use.ts",
     "hooks/stop": "src/hooks/stop.ts",
     // SDK-based scripts (no CLI dependency)

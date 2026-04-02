@@ -49,6 +49,52 @@ async function main() {
         contextLines.push("- `/mind:stats` - View statistics");
         contextLines.push("");
         contextLines.push("_Memories are captured automatically from your tool use._");
+        contextLines.push("");
+
+        // Inject recent memories from SDK
+        contextLines.push("**Recent Context:**");
+
+        try {
+          // Dynamic import to avoid slowing down cold starts
+          const { getMind } = await import("../core/mind.js");
+          const mind = await getMind();
+
+          const context = await mind.getContext();
+          const recentMemories = context.recentObservations.slice(0, 5);
+
+          if (recentMemories.length > 0) {
+            // Group by type
+            const byType: Record<string, string[]> = {};
+            for (const mem of recentMemories) {
+              if (!byType[mem.type]) byType[mem.type] = [];
+              byType[mem.type].push(mem.summary);
+            }
+
+            // Show categorized memories
+            if (byType.profile) {
+              contextLines.push(`👤 **Profile:** ${byType.profile.slice(0, 2).join(", ")}`);
+            }
+            if (byType.semantic) {
+              contextLines.push(`📚 **Knowledge:** ${byType.semantic.slice(0, 2).join(", ")}`);
+            }
+            if (byType.procedural) {
+              contextLines.push(`⚙️ **How-to:** ${byType.procedural.slice(0, 2).join(", ")}`);
+            }
+            if (byType.working) {
+              contextLines.push(`🔧 **Working:** ${byType.working.slice(0, 2).join(", ")}`);
+            }
+            if (byType.tool_result) {
+              contextLines.push(`🛠️ **Tools:** ${byType.tool_result.slice(0, 2).join(", ")}`);
+            }
+          } else {
+            contextLines.push("_No recent memories._");
+          }
+        } catch {
+          // SDK not available yet, continue without context
+          contextLines.push("_Context loading..._");
+        }
+
+        contextLines.push("");
         contextLines.push("</memvid-mind-context>");
       } catch {
         // Ignore stat errors

@@ -657,6 +657,20 @@ function getCompressionStats(originalSize, compressedSize) {
   return { ratio, saved, savedPercent };
 }
 
+// src/types/memory.ts
+var MEMORY_TYPES = {
+  /** User preferences, identity, stable facts */
+  PROFILE: "profile",
+  /** Knowledge, facts, concepts, decisions */
+  SEMANTIC: "semantic",
+  /** How-to, workflows, processes */
+  PROCEDURAL: "procedural",
+  /** Session-specific, temporary context */
+  WORKING: "working",
+  /** Tool outputs (Read, Edit, Bash results) */
+  TOOL_RESULT: "tool_result"
+};
+
 // src/hooks/post-tool-use.ts
 var OBSERVED_TOOLS = /* @__PURE__ */ new Set([
   "Read",
@@ -753,11 +767,15 @@ Tool: ${tool_name}`;
       metadata.compressedSize = compressed.length;
     }
     await mind.remember({
-      type: observationType,
+      type: MEMORY_TYPES.TOOL_RESULT,
       summary,
       content,
       tool: tool_name,
-      metadata
+      metadata: {
+        ...metadata,
+        memoryCategory: observationType
+        // Keep existing classification
+      }
     });
     markObserved(dedupKey);
     debug(`Stored: [${observationType}] ${summary}${wasCompressed ? " (compressed)" : ""}`);

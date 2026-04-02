@@ -13,6 +13,7 @@
 import { getMind } from "../core/mind.js";
 import { readStdin, writeOutput, debug } from "../utils/helpers.js";
 import type { HookInput, HookOutput } from "../types.js";
+import { MEMORY_TYPES } from "../types/memory.js";
 import { readFile, access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { execSync } from "node:child_process";
@@ -159,6 +160,143 @@ async function captureFileChanges(mind: Awaited<ReturnType<typeof getMind>>) {
   }
 }
 
+/**
+ * Parse transcript and capture full conversation
+ */
+async function captureTranscript(
+  mind: Awaited<ReturnType<typeof getMind>>,
+  transcriptPath: string,
+  sessionId: string
+) {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const content = await readFile(transcriptPath, "utf-8");
+    const lines = content.split("\n").filter(Boolean);
+
+    debug(`Parsing transcript: ${lines.length} lines`);
+
+    let userCount = 0,
+      assistantCount = 0;
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+
+        // Skip system reminders
+        if (entry.message?.content?.includes?.("<system-reminder>")) continue;
+
+        // User message
+        if (entry.type === "user" && entry.message?.content) {
+          const userContent = extractTextContent(entry.message.content);
+          if (userContent.length < 10) continue; // Skip too short
+
+          await mind.remember({
+            type: MEMORY_TYPES.WORKING,
+            summary: userContent.slice(0, 100),
+            content: userContent,
+            metadata: {
+              sessionId,
+              timestamp: entry.timestamp || Date.now(),
+              hook: "SessionEnd-transcript",
+            },
+          });
+          userCount++;
+        }
+
+        // Assistant message
+        if (entry.type === "assistant" && entry.message?.content) {
+          const assistantContent = extractTextContent(entry.message.content);
+
+          // Skip tool acknowledgments
+          if (isToolAcknowledgment(assistantContent)) continue;
+          if (assistantContent.length < 50) continue;
+
+          // Classify as semantic (explanation) or procedural (how-to)
+          const memoryType = classifyAssistantContent(assistantContent);
+
+          await mind.remember({
+            type: memoryType,
+            summary: assistantContent.slice(0, 100),
+            content: assistantContent,
+            metadata: {
+              sessionId,
+              timestamp: entry.timestamp || Date.now(),
+              hook: "SessionEnd-transcript",
+            },
+          });
+          assistantCount++;
+        }
+      } catch {
+        // Skip invalid JSON lines
+        continue;
+      }
+    }
+
+    debug(
+      `Transcript parsed: ${userCount} user, ${assistantCount} assistant messages`
+    );
+  } catch (error) {
+    debug(`Failed to parse transcript: ${error}`);
+  }
+}
+
+/**
+ * Extract text content from message (handles string or array format)
+ */
+function extractTextContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join("\n\n");
+  }
+  return "";
+}
+
+/**
+ * Check if assistant content is just a tool acknowledgment
+ */
+function isToolAcknowledgment(content: string): boolean {
+  const patterns = [
+    /^(I'll|Let me|I'm going to|I will|Now I'll|First,? I'll)\s+(run|use|execute|check|read|look at|search|edit|write|create)/i,
+    /^Running\s+/i,
+    /^Checking\s+/i,
+    /^Looking at\s+/i,
+    /^(The command|The file|The output|This shows|Here's what)/i,
+  ];
+
+  return (
+    patterns.some((p) => p.test(content.trim())) && content.length < 200
+  );
+}
+
+/**
+ * Classify assistant content as semantic or procedural
+ */
+function classifyAssistantContent(
+  content: string
+): "semantic" | "procedural" {
+  // Procedural indicators (how-to, workflows)
+  const proceduralPatterns = [
+    /\bsteps?:\b/i,
+    /\b\d+\.?\s*(?:first|next|then|after that|finally)\b/i,
+    /\bto (?:do this|implement|achieve|accomplish)\b/i,
+    /\bfollow\s+these\s+steps?\b/i,
+    /\bworkflow?\b/i,
+    /\bprocess:\b/i,
+    /\bhere's\s+how\b/i,
+  ];
+
+  // If it has procedural markers and is actionable
+  if (proceduralPatterns.some((p) => p.test(content))) {
+    return MEMORY_TYPES.PROCEDURAL;
+  }
+
+  // Default to semantic (knowledge, explanations, decisions)
+  return MEMORY_TYPES.SEMANTIC;
+}
+
 async function main() {
   try {
     // Read hook input from stdin
@@ -173,6 +311,15 @@ async function main() {
 
     // WORKAROUND: Capture file changes since PostToolUse doesn't fire for Edit
     await captureFileChanges(mind);
+
+    // Parse transcript and capture full conversation
+    if (hookInput.transcript_path) {
+      await captureTranscript(
+        mind,
+        hookInput.transcript_path,
+        hookInput.session_id || ""
+      );
+    }
 
     // Try to read the transcript for richer summary
     let transcriptContent = "";

@@ -19,6 +19,7 @@ import {
   getCompressionStats,
 } from "../utils/compression.js";
 import type { HookInput } from "../types.js";
+import { MEMORY_TYPES } from "../types/memory.js";
 
 // Tools worth capturing observations from
 const OBSERVED_TOOLS = new Set([
@@ -166,11 +167,14 @@ async function main() {
 
     // Store the observation
     await mind.remember({
-      type: observationType,
+      type: MEMORY_TYPES.TOOL_RESULT,
       summary,
       content,
       tool: tool_name,
-      metadata,
+      metadata: {
+        ...metadata,
+        memoryCategory: observationType,  // Keep existing classification
+      },
     });
 
     // Mark as observed for deduplication

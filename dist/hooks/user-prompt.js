@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-import { constants, readdirSync, unlinkSync, existsSync } from 'fs';
+import { readdirSync, unlinkSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
-import { access, readFile, mkdir, open } from 'fs/promises';
+import { mkdir, open } from 'fs/promises';
 import { randomBytes } from 'crypto';
 import lockfile from 'proper-lockfile';
-import { execSync } from 'child_process';
 
 // src/types.ts
 var DEFAULT_CONFIG = {
@@ -369,303 +368,52 @@ var MEMORY_TYPES = {
   /** Tool outputs (Read, Edit, Bash results) */
   TOOL_RESULT: "tool_result"
 };
-var MIN_OBSERVATIONS_FOR_SUMMARY = 3;
-async function captureFileChanges(mind) {
-  try {
-    const memoryPath = mind.getMemoryPath();
-    const workDir = memoryPath.replace(/\/\.claude\/.*$/, "");
-    const allChangedFiles = [];
-    let gitDiffContent = "";
-    try {
-      const diffNames = execSync("git diff --name-only HEAD 2>/dev/null || git diff --name-only 2>/dev/null || echo ''", {
-        cwd: workDir,
-        encoding: "utf-8",
-        timeout: 3e3,
-        stdio: ["pipe", "pipe", "pipe"]
-      }).trim();
-      const stagedNames = execSync("git diff --cached --name-only 2>/dev/null || echo ''", {
-        cwd: workDir,
-        encoding: "utf-8",
-        timeout: 3e3,
-        stdio: ["pipe", "pipe", "pipe"]
-      }).trim();
-      const gitFiles = [.../* @__PURE__ */ new Set([
-        ...diffNames.split("\n").filter(Boolean),
-        ...stagedNames.split("\n").filter(Boolean)
-      ])];
-      allChangedFiles.push(...gitFiles);
-      if (gitFiles.length > 0) {
-        try {
-          gitDiffContent = execSync("git diff HEAD --stat 2>/dev/null | head -30", {
-            cwd: workDir,
-            encoding: "utf-8",
-            timeout: 3e3,
-            stdio: ["pipe", "pipe", "pipe"]
-          }).trim();
-        } catch {
-        }
-      }
-    } catch {
-    }
-    try {
-      const recentFiles = execSync(
-        `find . -maxdepth 4 -type f \\( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" -o -name "*.md" -o -name "*.json" -o -name "*.py" -o -name "*.rs" \\) -mmin -30 ! -path "*/node_modules/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/target/*" 2>/dev/null | head -30`,
-        {
-          cwd: workDir,
-          encoding: "utf-8",
-          timeout: 5e3,
-          stdio: ["pipe", "pipe", "pipe"]
-        }
-      ).trim();
-      const recentFilesList = recentFiles.split("\n").filter(Boolean).map((f) => f.replace(/^\.\//, ""));
-      for (const file of recentFilesList) {
-        if (!allChangedFiles.includes(file)) {
-          allChangedFiles.push(file);
-        }
-      }
-    } catch {
-    }
-    if (allChangedFiles.length === 0) {
-      debug("No file changes detected");
-      return;
-    }
-    debug(`Capturing ${allChangedFiles.length} changed files`);
-    const contentParts = [`## Files Modified This Session
 
-${allChangedFiles.map((f) => `- ${f}`).join("\n")}`];
-    if (gitDiffContent) {
-      contentParts.push(`
-## Git Changes Summary
-\`\`\`
-${gitDiffContent}
-\`\`\``);
-    }
-    await mind.remember({
-      type: "refactor",
-      summary: `Session edits: ${allChangedFiles.length} file(s) modified`,
-      content: contentParts.join("\n"),
-      tool: "FileChanges",
-      metadata: {
-        files: allChangedFiles,
-        fileCount: allChangedFiles.length,
-        captureMethod: "git-diff-plus-recent"
-      }
-    });
-    for (const file of allChangedFiles) {
-      const fileName = file.split("/").pop() || file;
-      const isImportant = /^(README|CHANGELOG|package\.json|Cargo\.toml|\.env)/i.test(fileName);
-      if (isImportant) {
-        await mind.remember({
-          type: "refactor",
-          summary: `Modified ${fileName}`,
-          content: `File edited: ${file}
-This file was modified during the session.`,
-          tool: "FileEdit",
-          metadata: {
-            files: [file],
-            fileName
-          }
-        });
-        debug(`Stored individual edit: ${fileName}`);
-      }
-    }
-    debug(`Stored file changes: ${allChangedFiles.length} files`);
-  } catch (error) {
-    debug(`Failed to capture file changes: ${error}`);
-  }
-}
-async function captureTranscript(mind, transcriptPath, sessionId) {
-  try {
-    const { readFile: readFile2 } = await import('fs/promises');
-    const content = await readFile2(transcriptPath, "utf-8");
-    const lines = content.split("\n").filter(Boolean);
-    debug(`Parsing transcript: ${lines.length} lines`);
-    let userCount = 0, assistantCount = 0;
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line);
-        if (entry.message?.content?.includes?.("<system-reminder>")) continue;
-        if (entry.type === "user" && entry.message?.content) {
-          const userContent = extractTextContent(entry.message.content);
-          if (userContent.length < 10) continue;
-          await mind.remember({
-            type: MEMORY_TYPES.WORKING,
-            summary: userContent.slice(0, 100),
-            content: userContent,
-            metadata: {
-              sessionId,
-              timestamp: entry.timestamp || Date.now(),
-              hook: "SessionEnd-transcript"
-            }
-          });
-          userCount++;
-        }
-        if (entry.type === "assistant" && entry.message?.content) {
-          const assistantContent = extractTextContent(entry.message.content);
-          if (isToolAcknowledgment(assistantContent)) continue;
-          if (assistantContent.length < 50) continue;
-          const memoryType = classifyAssistantContent(assistantContent);
-          await mind.remember({
-            type: memoryType,
-            summary: assistantContent.slice(0, 100),
-            content: assistantContent,
-            metadata: {
-              sessionId,
-              timestamp: entry.timestamp || Date.now(),
-              hook: "SessionEnd-transcript"
-            }
-          });
-          assistantCount++;
-        }
-      } catch {
-        continue;
-      }
-    }
-    debug(
-      `Transcript parsed: ${userCount} user, ${assistantCount} assistant messages`
-    );
-  } catch (error) {
-    debug(`Failed to parse transcript: ${error}`);
-  }
-}
-function extractTextContent(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content.filter((p) => p.type === "text").map((p) => p.text).join("\n\n");
-  }
-  return "";
-}
-function isToolAcknowledgment(content) {
-  const patterns = [
-    /^(I'll|Let me|I'm going to|I will|Now I'll|First,? I'll)\s+(run|use|execute|check|read|look at|search|edit|write|create)/i,
-    /^Running\s+/i,
-    /^Checking\s+/i,
-    /^Looking at\s+/i,
-    /^(The command|The file|The output|This shows|Here's what)/i
-  ];
-  return patterns.some((p) => p.test(content.trim())) && content.length < 200;
-}
-function classifyAssistantContent(content) {
-  const proceduralPatterns = [
-    /\bsteps?:\b/i,
-    /\b\d+\.?\s*(?:first|next|then|after that|finally)\b/i,
-    /\bto (?:do this|implement|achieve|accomplish)\b/i,
-    /\bfollow\s+these\s+steps?\b/i,
-    /\bworkflow?\b/i,
-    /\bprocess:\b/i,
-    /\bhere's\s+how\b/i
-  ];
-  if (proceduralPatterns.some((p) => p.test(content))) {
-    return MEMORY_TYPES.PROCEDURAL;
-  }
-  return MEMORY_TYPES.SEMANTIC;
+// src/hooks/user-prompt.ts
+var PREFERENCE_PATTERNS = [
+  /i prefer/i,
+  /i like/i,
+  /i always/i,
+  /i usually/i,
+  /my favorite/i,
+  /i want/i,
+  /use (?:vim|emacs|nano|dark|light) mode/i
+];
+function isUserPreference(content) {
+  return PREFERENCE_PATTERNS.some((pattern) => pattern.test(content));
 }
 async function main() {
   try {
     const input = await readStdin();
     const hookInput = JSON.parse(input);
-    debug(`Session stopping: ${hookInput.session_id}`);
+    const { prompt, cwd, session_id } = hookInput;
+    if (!prompt || !prompt.trim()) {
+      writeOutput({ continue: true });
+      return;
+    }
+    debug(`UserPromptSubmit: ${prompt.slice(0, 50)}...`);
     const mind = await getMind();
-    const stats = await mind.stats();
-    await captureFileChanges(mind);
-    if (hookInput.transcript_path) {
-      await captureTranscript(
-        mind,
-        hookInput.transcript_path,
-        hookInput.session_id || ""
-      );
-    }
-    let transcriptContent = "";
-    if (hookInput.transcript_path) {
-      try {
-        await access(hookInput.transcript_path, constants.R_OK);
-        transcriptContent = await readFile(hookInput.transcript_path, "utf-8");
-      } catch {
+    const isPreference = isUserPreference(prompt);
+    const memoryType = isPreference ? MEMORY_TYPES.PROFILE : MEMORY_TYPES.WORKING;
+    const summary = prompt.slice(0, 100);
+    await mind.remember({
+      type: memoryType,
+      summary: isPreference ? `Preference: ${summary}` : summary,
+      content: prompt,
+      metadata: {
+        cwd,
+        session_id,
+        timestamp: Date.now(),
+        hook: "UserPromptSubmit"
       }
-    }
-    const context = await mind.getContext();
-    const sessionObservations = context.recentObservations.filter(
-      (obs) => obs.metadata?.sessionId === mind.getSessionId()
-    );
-    if (sessionObservations.length >= MIN_OBSERVATIONS_FOR_SUMMARY) {
-      const summary = generateSessionSummary(
-        sessionObservations,
-        transcriptContent
-      );
-      await mind.saveSessionSummary(summary);
-      debug(
-        `Session summary saved: ${summary.keyDecisions.length} decisions, ${summary.filesModified.length} files`
-      );
-    }
-    debug(
-      `Session complete. Total memories: ${stats.totalObservations}, File: ${mind.getMemoryPath()}`
-    );
-    const output = {
-      continue: true
-    };
-    writeOutput(output);
+    });
+    debug(`Stored user message [${memoryType}]: ${summary}`);
+    writeOutput({ continue: true });
   } catch (error) {
     debug(`Error: ${error}`);
     writeOutput({ continue: true });
   }
 }
-function generateSessionSummary(observations, transcript) {
-  const keyDecisions = [];
-  const filesModified = /* @__PURE__ */ new Set();
-  for (const obs of observations) {
-    if (obs.type === "decision" || obs.summary.toLowerCase().includes("chose") || obs.summary.toLowerCase().includes("decided")) {
-      keyDecisions.push(obs.summary);
-    }
-    const files = obs.metadata?.files;
-    if (files) {
-      files.forEach((f) => filesModified.add(f));
-    }
-  }
-  if (transcript) {
-    const filePatterns = [
-      /(?:Read|Edit|Write)[^"]*"([^"]+)"/g,
-      /file_path["\s:]+([^\s"]+)/g
-    ];
-    for (const pattern of filePatterns) {
-      let match;
-      while ((match = pattern.exec(transcript)) !== null) {
-        const path = match[1];
-        if (path && !path.includes("node_modules") && !path.startsWith(".")) {
-          filesModified.add(path);
-        }
-      }
-    }
-  }
-  const typeCounts = {};
-  for (const obs of observations) {
-    typeCounts[obs.type] = (typeCounts[obs.type] || 0) + 1;
-  }
-  const summaryParts = [];
-  if (typeCounts.feature) {
-    summaryParts.push(`Added ${typeCounts.feature} feature(s)`);
-  }
-  if (typeCounts.bugfix) {
-    summaryParts.push(`Fixed ${typeCounts.bugfix} bug(s)`);
-  }
-  if (typeCounts.refactor) {
-    summaryParts.push(`Refactored ${typeCounts.refactor} item(s)`);
-  }
-  if (typeCounts.discovery) {
-    summaryParts.push(`Made ${typeCounts.discovery} discovery(ies)`);
-  }
-  if (typeCounts.problem) {
-    summaryParts.push(`Encountered ${typeCounts.problem} problem(s)`);
-  }
-  if (typeCounts.solution) {
-    summaryParts.push(`Found ${typeCounts.solution} solution(s)`);
-  }
-  const summary = summaryParts.length > 0 ? summaryParts.join(". ") + "." : `Session with ${observations.length} observations.`;
-  return {
-    keyDecisions: keyDecisions.slice(0, 10),
-    filesModified: Array.from(filesModified).slice(0, 20),
-    summary
-  };
-}
 main();
-//# sourceMappingURL=stop.js.map
-//# sourceMappingURL=stop.js.map
+//# sourceMappingURL=user-prompt.js.map
+//# sourceMappingURL=user-prompt.js.map
